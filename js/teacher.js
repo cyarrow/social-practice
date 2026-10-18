@@ -7,6 +7,7 @@
 
   /* ---------- 門鎖 ---------- */
   function unlocked() {
+    if (Store.teacherLoggedIn) return Store.teacherLoggedIn();
     try { return sessionStorage.getItem('pp.teacherOK') === '1'; } catch (e) { return !!window.__teacherOK; }
   }
   function setUnlocked() {
@@ -14,6 +15,7 @@
     try { sessionStorage.setItem('pp.teacherOK', '1'); } catch (e) { /* 預覽環境可能不允許 */ }
   }
   function lock() {
+    if (Store.logout) Store.logout();
     window.__teacherOK = false;
     try { sessionStorage.removeItem('pp.teacherOK'); } catch (e) { /* 同上 */ }
     UI.go('/');
@@ -38,10 +40,19 @@
         if (pass.value.length < 4) { err.textContent = '密碼至少 4 個字。'; return; }
         if (pass.value !== pass2.value) { err.textContent = '兩次輸入的密碼不一樣。'; return; }
         await Store.setTeacherPass(pass.value);
-      } else if (!(await Store.checkTeacherPass(pass.value))) {
-        err.textContent = '密碼不正確。';
-        pass.select();
-        return;
+      } else {
+        let ok = false;
+        try {
+          ok = await Store.checkTeacherPass(pass.value);
+        } catch (e2) {
+          err.textContent = e2.message;
+          return;
+        }
+        if (!ok) {
+          err.textContent = '密碼不正確。';
+          pass.select();
+          return;
+        }
       }
       setUnlocked();
       UI.go('/t/home');
@@ -57,7 +68,7 @@
         pass2 ? h('div', { class: 'field' }, h('label', { for: 't-pass2' }, '再輸入一次'), pass2) : null,
         err,
         h('div', { class: 'btn-row' }, h('button', { class: 'btn primary', type: 'submit' }, has ? '進入' : '設定並進入'), h('a', { class: 'btn ghost', href: '#/' }, '回學生端')),
-        h('p', { class: 'muted', style: { fontSize: 'var(--fs-xs)' } }, '提醒：原型版本的密碼只存在這台電腦，用來避免誤入，不是嚴格的安全機制。')),
+        Store.mode === 'remote' ? null : h('p', { class: 'muted', style: { fontSize: 'var(--fs-xs)' } }, '提醒：原型版本的密碼只存在這台電腦，用來避免誤入，不是嚴格的安全機制。')),
     ), true);
     pass.focus();
   }
@@ -76,6 +87,7 @@
         bare ? null : h('nav', { class: 'nav', 'aria-label': '老師選單' },
           link('#/t/home', '總覽', 'home'),
           link('#/t/exams', '考卷管理', 'exams'),
+          Store.features.students ? link('#/t/students', '學生', 'students') : null,
           link('#/t/import', '匯入', 'import'),
           link('#/t/reports', '成績報表', 'reports'),
           link('#/t/data', '資料', 'data'),
@@ -100,11 +112,13 @@
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '老師專區'),
         h('h1', { class: 'page-title' }, '總覽'),
-        h('p', { class: 'lede' }, '原型版本的成績只存在各自的電腦裡。學生在自己的筆電作答後，請他從「作答紀錄」匯出成績檔，你再到「匯入」頁匯進來。')),
+        h('p', { class: 'lede' }, Store.mode === 'remote' ?
+          '學生交卷後，成績會自動存到你的 Google 試算表，這裡的數字也會跟著更新。' :
+          '原型版本的成績只存在各自的電腦裡。學生在自己的筆電作答後，請他從「作答紀錄」匯出成績檔，你再到「匯入」頁匯進來。')),
       attempts.length ? null : h('div', { class: 'notice', style: { marginBottom: '20px' } },
-        h('div', null, '目前還沒有任何成績。可以先匯入學生的成績檔，或產生一組示範成績，看看報表長什麼樣子。'),
+        h('div', null, Store.mode === 'remote' ? '目前還沒有任何成績。學生交卷後就會出現在這裡；也可以先產生一組示範成績，看看報表長什麼樣子。' : '目前還沒有任何成績。可以先匯入學生的成績檔，或產生一組示範成績，看看報表長什麼樣子。'),
         h('div', { class: 'btn-row' },
-          h('a', { class: 'btn small', href: '#/t/import' }, '匯入成績檔'),
+          Store.features.resultImport ? h('a', { class: 'btn small', href: '#/t/import' }, '匯入成績檔') : null,
           h('button', { class: 'btn small primary', type: 'button', onclick: async () => { await makeDemo(); UI.render(); } }, '產生示範成績'))),
       real.length === 0 && attempts.length ? h('div', { class: 'notice quiet', style: { marginBottom: '20px' } },
         h('div', null, '目前顯示的是示範成績，不是學生的真實紀錄。'),
@@ -175,7 +189,7 @@
           h('span', { class: 'tag' }, [UI.subjectOf(e)].concat(e.lessons || []).join(' · ')), h('br'),
           h('a', { href: '#/t/edit/' + e.id, style: { fontWeight: 700 } }, e.title),
           e.modified ? h('span', { class: 'pill', style: { marginLeft: '8px' } }, '已修改') : null,
-          !e.builtin ? h('span', { class: 'pill', style: { marginLeft: '8px' } }, '自建') : null),
+          !e.builtin && Store.mode === 'local' ? h('span', { class: 'pill', style: { marginLeft: '8px' } }, '自建') : null),
         h('td', { class: 'r' }, n),
         h('td', { class: 'r nw' }, e.timeLimit + ' 分'),
         h('td', { class: 'r' }, used),
@@ -196,7 +210,7 @@
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '考卷管理'),
         h('h1', { class: 'page-title' }, `${list.length} 份考卷`),
-        h('p', { class: 'lede' }, '「開放」控制學生看不看得到；「解析」決定交卷後是否馬上顯示答案。修改內建考卷會另存一份，隨時可以還原。')),
+        h('p', { class: 'lede' }, '「開放」控制學生看不看得到；「解析」決定交卷後是否馬上顯示答案。' + (Store.mode === 'remote' ? '考卷存在你的 Google 試算表。' : '修改內建考卷會另存一份，隨時可以還原。'))),
       h('div', { class: 'btn-row', style: { marginBottom: '20px' } },
         h('a', { class: 'btn primary', href: '#/t/new' }, '新增空白考卷'),
         h('a', { class: 'btn', href: '#/t/import' }, '貼上文字匯入'),
@@ -485,7 +499,9 @@
     const box = h('div');
     const tabs = h('div', { class: 'tabs', role: 'tablist' });
     function drawTabs() {
-      tabs.replaceChildren(...[['text', '貼上文字'], ['file', '上傳考卷檔'], ['results', '匯入學生成績檔']].map(([k, t]) =>
+      const all = [['text', '貼上文字'], ['file', '上傳考卷檔']].concat(Store.features.resultImport ? [['results', '匯入學生成績檔']] : []);
+      if (!all.some(([k]) => k === tab)) tab = 'text';
+      tabs.replaceChildren(...all.map(([k, t]) =>
         h('button', { type: 'button', role: 'tab', 'aria-selected': String(tab === k), onclick: () => { tab = k; Store.pref('importTab', k); drawTabs(); drawBody(); } }, t)));
     }
     function drawBody() {
@@ -499,7 +515,7 @@
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '匯入'),
         h('h1', { class: 'page-title' }, '把題目或成績匯進平台'),
-        h('p', { class: 'lede' }, '請 Claude 出題時，可以要求它「用練習平台的文字格式輸出」，再貼到這裡。也可以上傳 JSON 考卷檔，或匯入學生交來的成績檔。')),
+        h('p', { class: 'lede' }, '請 Claude 出題時，可以要求它「用練習平台的文字格式輸出」，再貼到這裡。也可以上傳 JSON 考卷檔' + (Store.features.resultImport ? '，或匯入學生交來的成績檔。' : '。'))),
       tabs,
       box,
     ]);
@@ -584,6 +600,7 @@
           e.id = e.id && !(await Store.getExam(e.id)) ? e.id : Core.uid('x');
           e.settings = Object.assign({ published: false, reveal: 'immediate' }, e.settings || {});
           e.origin = e.origin || '檔案匯入';
+          out.replaceChildren(h('p', { class: 'muted' }, `正在儲存「${e.title}」…（${saved.length + 1} / ${list.length}）`));
           await Store.saveExam(e);
           saved.push(e.title);
         }
@@ -814,14 +831,15 @@
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '資料'),
         h('h1', { class: 'page-title' }, '備份與設定'),
-        h('p', { class: 'lede' }, '原型版本的資料都存在這台電腦的瀏覽器。換電腦或清除瀏覽資料前，記得先下載備份。')),
+        h('p', { class: 'lede' }, Store.mode === 'remote' ? '資料都存在你的 Google 試算表，Google 會自動保留版本記錄。' : '原型版本的資料都存在這台電腦的瀏覽器。換電腦或清除瀏覽資料前，記得先下載備份。')),
       h('div', { class: 'grid-halves' },
         h('section', { class: 'panel' },
           h('h2', { class: 'panel-title' }, '備份'),
-          h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginBottom: '16px' } }, '備份檔包含：考卷修改、自建考卷、開放設定、所有作答紀錄。'),
+          h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginBottom: '16px' } }, Store.mode === 'remote' ? '下載一份 JSON 檔，包含所有考卷、學生和作答紀錄。' : '備份檔包含：考卷修改、自建考卷、開放設定、所有作答紀錄。'),
           h('div', { style: { display: 'grid', gap: '16px' } },
             h('div', null, h('button', { class: 'btn primary', type: 'button', onclick: async () => UI.saveFile(`練習平台備份_${fmtDate(new Date().toISOString(), false).replace(/\//g, '')}.json`, JSON.stringify(await Store.exportAll())) }, '下載完整備份')),
-            h('div', { class: 'field' }, h('label', { for: 'restore-file' }, '從備份檔還原'), restoreInput))),
+            Store.features.restoreBackup ? h('div', { class: 'field' }, h('label', { for: 'restore-file' }, '從備份檔還原'), restoreInput) :
+              h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)' } }, '資料存在你的 Google 試算表。需要還原時，請在試算表的「檔案 → 版本記錄」找回之前的版本。'))),
         h('section', { class: 'panel' },
           h('h2', { class: 'panel-title' }, '示範成績'),
           h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginBottom: '16px' } }, demo ? `目前有 ${demo} 筆示範成績（學生端看不到）。` : '產生幾筆「示範學生」的成績，用來看報表的樣子。學生端看不到這些資料。'),
@@ -834,13 +852,19 @@
             h('div', { class: 'field' }, h('label', { for: 'np1' }, '新密碼'), p1),
             h('div', { class: 'field' }, h('label', { for: 'np2' }, '再輸入一次'), p2),
             h('div', null, h('button', { class: 'btn', type: 'button', onclick: async () => {
-              if (p1.value.length < 4) { UI.toast('密碼至少 4 個字'); return; }
+              const min = Store.mode === 'remote' ? 6 : 4;
+              if (p1.value.length < min) { UI.toast(`密碼至少 ${min} 個字`); return; }
               if (p1.value !== p2.value) { UI.toast('兩次輸入的密碼不一樣'); return; }
-              await Store.setTeacherPass(p1.value);
+              try {
+                await Store.setTeacherPass(p1.value);
+              } catch (e) {
+                UI.toast(e.message, 4000);
+                return;
+              }
               p1.value = p2.value = '';
               UI.toast('已更新密碼');
             } }, '更新密碼')))),
-        h('section', { class: 'panel' },
+        Store.features.clearAttempts ? h('section', { class: 'panel' },
           h('h2', { class: 'panel-title' }, '清除作答紀錄'),
           h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginBottom: '16px' } }, '刪除這台電腦上所有作答紀錄與錯題本進度，考卷不受影響。清除前建議先下載備份。'),
           h('button', { class: 'btn danger', type: 'button', onclick: async () => {
@@ -848,11 +872,95 @@
             for (const a of await Store.listAttempts()) await Store.deleteAttempt(a.id);
             UI.toast('已清除');
             UI.render();
-          } }, '清除作答紀錄'))),
+          } }, '清除作答紀錄')) : null),
+    ]);
+  }
+
+  /* ---------- 學生與專屬連結 ---------- */
+  async function students() {
+    if (!Store.features.students) {
+      await shell('students', h('section', { class: 'panel' }, h('p', { class: 'empty' }, '接上 Google 試算表後，才能在這裡新增學生、產生專屬連結。')));
+      return;
+    }
+    const list = await Store.listStudents();
+    const attempts = submittedOnly(await Store.listAttempts()).filter((a) => !a.demo);
+    const nameInput = h('input', { class: 'input', id: 'new-student', maxlength: 20, placeholder: '例如：王小明' });
+
+    function linkBox(s) {
+      const url = Store.studentLink(s.code);
+      const field = h('input', { class: 'input', readonly: true, value: url, 'aria-label': s.name + ' 的專屬連結', style: { fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }, onfocus: (e) => e.target.select() });
+      return h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', minWidth: '280px' } }, field,
+        h('button', { class: 'btn small', type: 'button', onclick: () => UI.copyText(url, field) }, '複製'));
+    }
+    async function add() {
+      const name = nameInput.value.trim();
+      if (!name) { UI.toast('請輸入學生名字'); nameInput.focus(); return; }
+      try {
+        const s = await Store.addStudent(name);
+        await UI.dialog({
+          title: `已新增「${s.name}」`,
+          body: [h('p', null, '把下面的專屬連結傳給學生。學生點一次連結就能開始作答；換電腦時再點一次就好。'), linkBox(s)],
+          ok: '完成',
+          cancel: false,
+        });
+        UI.render();
+      } catch (e) {
+        UI.toast(e.message, 4000);
+      }
+    }
+    async function reset(s) {
+      const ok = await UI.dialog({
+        title: `幫「${s.name}」換一組新連結？`,
+        body: '舊的連結會立刻失效，作答紀錄都會保留。換好後，記得把新連結傳給學生。',
+        ok: '換新連結',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const n = await Store.updateStudent(s.studentId, { resetCode: true });
+        await UI.dialog({ title: '新的專屬連結', body: [h('p', null, '請把這個連結傳給學生，舊連結已經不能用了。'), linkBox(n)], ok: '完成', cancel: false });
+        UI.render();
+      } catch (e) {
+        UI.toast(e.message, 4000);
+      }
+    }
+    async function rename(s) {
+      const input = h('input', { class: 'input', id: 'rename-student', value: s.name, maxlength: 20 });
+      if (!(await UI.dialog({ title: '修改名字', body: [input], ok: '儲存' }))) return;
+      if (!input.value.trim()) return;
+      try { await Store.updateStudent(s.studentId, { name: input.value.trim() }); UI.render(); } catch (e) { UI.toast(e.message, 4000); }
+    }
+    async function toggle(s) {
+      if (s.active && !(await UI.dialog({ title: `停用「${s.name}」？`, body: '停用後專屬連結不能再使用，作答紀錄會保留，之後可以再啟用。', ok: '停用', danger: true }))) return;
+      try { await Store.updateStudent(s.studentId, { active: !s.active }); UI.render(); } catch (e) { UI.toast(e.message, 4000); }
+    }
+
+    await shell('students', [
+      h('div', { class: 'page-head' },
+        h('span', { class: 'eyebrow' }, '學生'),
+        h('h1', { class: 'page-title' }, list.length ? `${list.length} 位學生` : '新增第一位學生'),
+        h('p', { class: 'lede' }, '每位學生有一個專屬連結，學生點連結就能作答，不用帳號密碼。連結不小心外流時，按「換新連結」，舊連結就會失效。')),
+      h('section', { class: 'panel' },
+        h('h2', { class: 'panel-title' }, '新增學生'),
+        h('form', { class: 'btn-row', onsubmit: (e) => { e.preventDefault(); add(); } },
+          h('div', { style: { flex: '1 1 220px', maxWidth: '320px' } }, nameInput),
+          h('button', { class: 'btn primary', type: 'submit' }, '新增並產生連結'))),
+      list.length ? h('section', { class: 'panel' }, h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', null, h('tr', null, h('th', null, '名字'), h('th', null, '專屬連結'), h('th', null, '狀態'), h('th', { class: 'r' }, '交卷次數'), h('th', null, ''))),
+        h('tbody', null, list.map((s) => h('tr', null,
+          h('td', { class: 'nw' }, h('b', null, s.name)),
+          h('td', null, s.active ? linkBox(s) : h('span', { class: 'muted' }, '已停用')),
+          h('td', { class: 'nw' }, h('span', { class: 'pill ' + (s.active ? 'good' : '') }, s.active ? '使用中' : '已停用')),
+          h('td', { class: 'r' }, attempts.filter((a) => a.studentId === s.studentId).length),
+          h('td', { class: 'nw' }, h('div', { class: 'btn-row' },
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => rename(s) }, '改名'),
+            s.active ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => reset(s) }, '換新連結') : null,
+            h('button', { class: 'btn small ghost', type: 'button', onclick: () => toggle(s) }, s.active ? '停用' : '啟用'))))))))) : null,
     ]);
   }
 
   window.Teacher = {
+    students: guard(students),
     gate,
     home: guard(home),
     exams: guard(exams),

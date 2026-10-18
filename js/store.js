@@ -59,6 +59,11 @@
 
   const Store = {
     mode: 'local',
+    // 介面依這些開關決定要不要顯示某些功能
+    features: { studentName: true, exportResults: true, resultImport: true, restoreBackup: true, clearAttempts: true, students: false },
+
+    async ready() { return { ok: true }; },
+    async sync() {},
 
     /* 學生 */
     async getStudent() { return read('student', null); },
@@ -67,6 +72,8 @@
     /* 考卷 */
     async listExams() { return allExams(); },
     async getExam(id) { return allExams().find((e) => e.id === id) || null; },
+    // 交卷後檢討用的考卷（含答案）；原型模式答案本來就在
+    async getReviewExam(id) { return Store.getExam(id); },
     async saveExam(exam) {
       const custom = read('customExams', {});
       const copy = JSON.parse(JSON.stringify(exam));
@@ -176,6 +183,26 @@
       p[key] = { at: new Date().toISOString(), correct: !!correct };
       write('practice', p);
     },
+    // 錯題練習判斷對錯；回傳 { earned, max, full, answer?, explanation? }
+    async checkPractice(examId, qid, chosen) {
+      const exam = await Store.getExam(examId);
+      const x = exam && Core.flatQuestions(exam).find((f) => f.q.id === qid);
+      if (!x) throw new Error('找不到這一題');
+      const earned = Core.scoreQuestion(x.q, chosen);
+      const full = earned === x.q.points;
+      await Store.logPractice(examId + '/' + qid, full);
+      const res = { earned, max: x.q.points, full };
+      if (exam.settings.reveal === 'immediate' || exam.settings.released) {
+        res.answer = x.q.answer;
+        res.explanation = x.q.explanation || '';
+      }
+      return res;
+    },
+
+    /* 學生名單（只有接上試算表後才有） */
+    async listStudents() { return []; },
+    async addStudent() { throw new Error('接上 Google 試算表後才能新增學生。'); },
+    async updateStudent() { throw new Error('接上 Google 試算表後才能管理學生。'); },
 
     /* 匯出與匯入 */
     async exportAttempts() {

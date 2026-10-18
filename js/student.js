@@ -23,10 +23,14 @@
           link('#/', '考卷', 'home'),
           link('#/wrong', '錯題本', 'wrong'),
           link('#/history', '作答紀錄', 'history'),
-          h('button', { class: 'who', type: 'button', onclick: renameStudent, title: '修改名字' }, student ? student.name : '尚未輸入名字')))),
+          Store.features.studentName ?
+            h('button', { class: 'who', type: 'button', onclick: renameStudent, title: '修改名字' }, student ? student.name : '尚未輸入名字') :
+            h('span', { class: 'who' }, student ? student.name : '')))),
       h('main', null, h('div', { class: 'wrap' }, content)),
       h('footer', { class: 'footer' }, h('div', { class: 'wrap' },
-        h('span', null, '作答紀錄存在這台電腦的瀏覽器裡。換電腦或清除瀏覽資料會看不到之前的紀錄。'),
+        h('span', null, Store.mode === 'remote' ?
+          '作答紀錄會自動存到老師那裡。換電腦時，再點一次老師給你的專屬連結就好。' :
+          '作答紀錄存在這台電腦的瀏覽器裡。換電腦或清除瀏覽資料會看不到之前的紀錄。'),
         h('a', { href: '#/t' }, '老師專區'))));
     window.scrollTo(0, 0);
   }
@@ -93,7 +97,7 @@
         h('h1', { class: 'page-title' }, '今天要練哪一份？'),
         h('p', { class: 'lede' }, '每份考卷都有倒數計時，時間到會自動交卷。交卷後可以看到分數、每題解析，答錯的題目會收進錯題本。')),
       notices.length ? h('div', { style: { display: 'grid', gap: '10px', marginBottom: '24px' } }, notices) : null,
-      student ? null : h('div', { class: 'notice quiet', style: { marginBottom: '24px' } },
+      student || !Store.features.studentName ? null : h('div', { class: 'notice quiet', style: { marginBottom: '24px' } },
         h('div', null, '第一次使用嗎？先輸入你的名字，成績單上才知道是誰寫的。'),
         h('button', { class: 'btn small', type: 'button', onclick: renameStudent }, '輸入名字')),
       h('div', { class: 'grid-2' },
@@ -141,14 +145,14 @@
     const running = (await Store.listAttempts({ examId: id, status: 'in_progress' })).find((a) => Date.parse(a.deadline) > Date.now());
     const student = await Store.getStudent();
     const qs = Core.flatQuestions(exam);
-    const nameInput = student ? null : h('input', { class: 'input', id: 'intro-name', maxlength: 20, placeholder: '例如：王小明' });
+    const nameInput = student || !Store.features.studentName ? null : h('input', { class: 'input', id: 'intro-name', maxlength: 20, placeholder: '例如：王小明' });
     const hasMulti = qs.some((x) => x.q.type === 'multi');
     const reveal = exam.settings.reveal === 'immediate' ? '交卷後馬上可以看到答案與解析。' : '答案與解析要等老師開放後才看得到；交卷後會先看到分數。';
 
     async function begin() {
       if (running) { UI.go('/take/' + running.id); return; }
       let s = student;
-      if (!s) {
+      if (!s && nameInput) {
         if (!nameInput.value.trim()) { UI.toast('請先輸入你的名字'); nameInput.focus(); return; }
         s = await Store.setStudent(nameInput.value);
       }
@@ -328,10 +332,24 @@
         if (!ok) return;
       }
       submitting = true;
-      await Store.saveProgress(id, { answers, flags, current: idx });
-      await Store.submitAttempt(id, { auto });
-      UI.go('/result/' + id);
+      stage.className = 'qstage';
+      stage.replaceChildren(h('section', { class: 'qpane' }, h('p', { class: 'empty' }, auto ? '時間到，正在交卷並批改…' : '正在交卷並批改…')));
+      try {
+        await Store.saveProgress(id, { answers, flags, current: idx });
+        await Store.submitAttempt(id, { auto });
+        UI.go('/result/' + id);
+      } catch (e) {
+        submitting = false;
+        draw();
+        if (auto) {
+          UI.toast('交卷沒有成功，10 秒後自動再試一次', 5000);
+          retryId = setTimeout(() => trySubmit(true), 10000);
+        } else {
+          await UI.dialog({ title: '交卷沒有成功', body: e.message + '\n你的答案都還在這台電腦上，請確認網路後再按一次「交卷」。', ok: '知道了', cancel: false });
+        }
+      }
     }
+    let retryId = null;
 
     function tick() {
       const left = (Date.parse(attempt.deadline) - Date.now()) / 1000;
@@ -365,6 +383,7 @@
     document.addEventListener('keydown', onKey);
     return () => {
       clearInterval(timerId);
+      clearTimeout(retryId);
       document.removeEventListener('keydown', onKey);
       document.body.classList.remove('taking');
     };
@@ -385,9 +404,9 @@
     const a = await Store.getAttempt(id);
     if (!a) throw new Error('找不到這次作答紀錄。');
     if (a.status !== 'submitted') { UI.go('/take/' + id); return; }
-    const exam = await Store.getExam(a.examId);
+    const exam = await Store.getReviewExam(a.examId);
     const r = a.result;
-    const reveal = canReveal(exam);
+    const reveal = canReveal(exam) && exam.hasKeys !== false;
     const per = Object.values(r.perQ);
     const count = (s) => per.filter((p) => p.status === s).length;
     let filter = 'all';
@@ -453,7 +472,7 @@
       h('div', { class: 'btn-row', style: { marginTop: '28px' } },
         exam ? h('a', { class: 'btn primary', href: '#/exam/' + exam.id }, '再寫一次') : null,
         count('wrong') + count('partial') ? h('a', { class: 'btn', href: '#/practice/' + a.examId }, '練這份的錯題') : null,
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => exportResults() }, '匯出成績檔給老師')),
+        Store.features.exportResults ? h('button', { class: 'btn ghost', type: 'button', onclick: () => exportResults() }, '匯出成績檔給老師') : null),
     ]);
   }
 
@@ -539,15 +558,16 @@
     let i = 0;
     let chosen = '';
     let checked = false;
+    let res = null;
     let right = 0;
     const box = h('div');
 
     function draw() {
       const it = items[i];
       const q = it.q;
-      const revealed = checked && canReveal(it.exam);
-      const got = checked ? Core.scoreQuestion(q, chosen) : 0;
-      const full = checked && got === q.points;
+      const revealed = checked && res && res.answer !== undefined;
+      const got = checked ? res.earned : 0;
+      const full = checked && res.full;
       box.replaceChildren(h('section', { class: 'panel' },
         h('div', { class: 'qhead', style: { justifyContent: 'space-between' } },
           h('span', null, h('span', { class: 'qno' }, `${i + 1}`), h('span', { class: 'qtype' }, ` / ${items.length}　${it.exam.title} 第 ${it.no} 題 · ${UI.typeLabel(q)}`)),
@@ -561,11 +581,11 @@
             else chosen = chosen === L ? '' : L;
             draw();
           },
-          reveal: { answer: q.answer, showAnswer: revealed },
+          reveal: { answer: revealed ? res.answer : '', showAnswer: revealed },
         }),
         checked ? h('div', { class: 'explain' },
           h('h4', null, full ? '答對了！這題會從錯題本移除' : got > 0 ? `部分得分（${fmtScore(got)} / ${fmtScore(q.points)} 分），再想想看` : '還沒答對'),
-          revealed ? [paras(q.explanation || '（這題沒有解析）'), q.ref ? h('p', { class: 'ref' }, '出處：' + q.ref) : null] :
+          revealed ? [paras(res.explanation || '（這題沒有解析）'), q.ref ? h('p', { class: 'ref' }, '出處：' + q.ref) : null] :
             h('p', null, '老師還沒開放這份考卷的解析。')) : null,
         h('div', { class: 'qfoot' },
           h('a', { class: 'btn ghost', href: '#/wrong' }, '結束練習'),
@@ -574,14 +594,18 @@
             h('button', { class: 'btn primary', type: 'button', disabled: !chosen, onclick: check }, '檢查答案'))));
     }
     async function check() {
+      try {
+        res = await Store.checkPractice(items[i].examId, items[i].qid, chosen);
+      } catch (e) {
+        UI.toast(e.message, 4000);
+        return;
+      }
       checked = true;
-      const full = Core.scoreQuestion(items[i].q, chosen) === items[i].q.points;
-      if (full) right++;
-      await Store.logPractice(items[i].key, full);
+      if (res.full) right++;
       draw();
     }
     function next() {
-      if (i < items.length - 1) { i++; chosen = ''; checked = false; draw(); window.scrollTo(0, 0); return; }
+      if (i < items.length - 1) { i++; chosen = ''; checked = false; res = null; draw(); window.scrollTo(0, 0); return; }
       box.replaceChildren(h('section', { class: 'panel' },
         h('h2', { class: 'panel-title' }, '練習結束'),
         h('p', { class: 'lede' }, `這一輪 ${items.length} 題，答對 ${right} 題。${right < items.length ? '沒答對的題目還留在錯題本裡。' : '全部訂正完成！'}`),
@@ -601,7 +625,7 @@
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '作答紀錄'),
         h('h1', { class: 'page-title' }, list.length ? `寫過 ${list.filter((a) => a.status === 'submitted').length} 份考卷` : '還沒有作答紀錄'),
-        h('p', { class: 'lede' }, '可以把成績檔匯出給老師；老師在「老師專區」匯入後就能看到你的成績分析。')),
+        h('p', { class: 'lede' }, Store.features.exportResults ? '可以把成績檔匯出給老師；老師在「老師專區」匯入後就能看到你的成績分析。' : '每次交卷的成績都會自動送到老師那裡。')),
       h('section', { class: 'panel' },
         list.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
           h('thead', null, h('tr', null, h('th', null, '時間'), h('th', null, '考卷'), h('th', { class: 'r' }, '分數'), h('th', { class: 'r' }, '作答時間'), h('th', null, '狀態'), h('th', null, ''))),
@@ -613,9 +637,37 @@
             h('td', null, a.status === 'submitted' ? (a.autoSubmitted ? h('span', { class: 'pill' }, '時間到自動交卷') : h('span', { class: 'pill' }, '已交卷')) : h('span', { class: 'pill solid' }, '作答中')),
             h('td', null, h('a', { class: 'btn small', href: (a.status === 'submitted' ? '#/result/' : '#/take/') + a.id }, a.status === 'submitted' ? '看成績' : '繼續'))))))) :
           h('p', { class: 'empty' }, '寫完第一份考卷後，紀錄會出現在這裡。'),
-        list.some((a) => a.status === 'submitted') ? h('div', { class: 'btn-row', style: { marginTop: '20px' } }, h('button', { class: 'btn', type: 'button', onclick: exportResults }, '匯出成績檔給老師')) : null),
+        Store.features.exportResults && list.some((a) => a.status === 'submitted') ? h('div', { class: 'btn-row', style: { marginTop: '20px' } }, h('button', { class: 'btn', type: 'button', onclick: exportResults }, '匯出成績檔給老師')) : null),
     ]);
   }
 
-  window.Student = { home, intro, take, result, wrong, practice, history, APP_NAME, canReveal, STATUS, reviewItem };
+  /* ---------- 專屬連結 ---------- */
+  async function enter({ code }) {
+    if (Store.enter) await Store.enter(code);
+    UI.go('/');
+  }
+
+  // 沒有專屬連結、連結失效或連不上伺服器時顯示
+  async function landing(state) {
+    document.body.classList.remove('taking', 'teacher');
+    const msg = {
+      nocode: ['請使用老師給你的專屬連結', '這個網站要用專屬連結打開。請點老師傳給你的連結；之後在同一台電腦上，直接打開網站就可以了。'],
+      badcode: ['這個連結已經失效', '請跟老師要一個新的專屬連結。你之前的作答紀錄都還在，換成新連結後就看得到。'],
+      network: ['連不上伺服器', '請確認網路連線，然後重新整理這個頁面。'],
+    }[state.reason] || ['暫時無法開啟', state.message || '請稍後再試，或跟老師聯絡。'];
+    document.getElementById('app').replaceChildren(
+      h('header', { class: 'masthead' }, h('div', { class: 'wrap' },
+        h('span', { class: 'brand' },
+          h('span', { class: 'brand-mark', 'aria-hidden': 'true' }, '社'),
+          h('span', { class: 'brand-name' }, APP_NAME)))),
+      h('main', null, h('div', { class: 'wrap narrow' },
+        h('div', { class: 'page-head' },
+          h('span', { class: 'eyebrow' }, APP_NAME),
+          h('h1', { class: 'page-title' }, msg[0]),
+          h('p', { class: 'lede' }, msg[1])),
+        state.reason === 'network' ? h('button', { class: 'btn primary', type: 'button', onclick: () => location.reload() }, '重新整理') : null)),
+      h('footer', { class: 'footer' }, h('div', { class: 'wrap' }, h('span', null, ''), h('a', { href: '#/t' }, '老師專區'))));
+  }
+
+  window.Student = { home, intro, take, result, wrong, practice, history, enter, landing, APP_NAME, canReveal, STATUS, reviewItem };
 })();

@@ -2,14 +2,21 @@
 (function () {
   'use strict';
   const { route } = UI;
-  route('/', Student.home);
-  route('/exam/:id', Student.intro);
-  route('/take/:id', Student.take);
-  route('/result/:id', Student.result);
-  route('/wrong', Student.wrong);
-  route('/practice', Student.practice);
-  route('/practice/:examId', Student.practice);
-  route('/history', Student.history);
+  // 學生頁面：試算表模式下要先確認專屬連結有效
+  const student = (fn) => async (params) => {
+    const r = await Store.ready();
+    if (!r.ok) return Student.landing(r);
+    return fn(params);
+  };
+  route('/s/:code', Student.enter);
+  route('/', student(Student.home));
+  route('/exam/:id', student(Student.intro));
+  route('/take/:id', student(Student.take));
+  route('/result/:id', student(Student.result));
+  route('/wrong', student(Student.wrong));
+  route('/practice', student(Student.practice));
+  route('/practice/:examId', student(Student.practice));
+  route('/history', student(Student.history));
 
   route('/t', Teacher.gate);
   route('/t/home', Teacher.home);
@@ -20,6 +27,7 @@
   route('/t/import', Teacher.import);
   route('/t/reports', Teacher.reports);
   route('/t/data', Teacher.data);
+  route('/t/students', Teacher.students);
 
   UI.start(() => UI.go('/'));
 })();

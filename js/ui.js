@@ -86,6 +86,7 @@
           if (typeof c === 'function') cleanup = c;
         } catch (e) {
           console.error(e);
+          if (e && e.code === 'auth') { go('/t'); return; }
           showError(e);
         }
         return;
