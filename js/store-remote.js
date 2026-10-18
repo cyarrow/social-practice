@@ -27,18 +27,32 @@
     if (document.body) document.body.classList.toggle('busy', busy > 0);
   }
 
+  // 這些動作重送可能會重複建立資料，連線失敗時不自動重試
+  const NO_RETRY = ['t_addStudent', 't_addAttempts', 't_updateStudent'];
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
   async function call(action, payload, teacher) {
     const body = Object.assign({ action }, payload || {});
     if (teacher) body.token = getToken(); else body.code = getCode();
+    const tries = NO_RETRY.includes(action) ? 1 : 3;
     let res;
     setBusy(1);
     try {
-      const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
-      res = await r.json();
-    } catch (e) {
-      const err = new Error('連不上伺服器。請確認網路連線後再試一次。');
-      err.code = 'network';
-      throw err;
+      for (let i = 0; i < tries; i++) {
+        try {
+          const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+          res = await r.json();
+          break;
+        } catch (e) {
+          // Google 偶爾會連線失敗（尤其閒置後第一次呼叫），等一下再試
+          if (i === tries - 1) {
+            const err = new Error('連不上伺服器。請確認網路連線後再試一次。');
+            err.code = 'network';
+            throw err;
+          }
+          await wait(1500 * (i + 1));
+        }
+      }
     } finally {
       setBusy(-1);
     }
@@ -206,6 +220,9 @@
       delete timers[id];
       const cur = await Store.getAttempt(id);
       const done = await call('submit', { attemptId: id, answers: cur ? cur.answers : null, flags: cur ? cur.flags : null, auto: !!(opts && opts.auto) });
+      // 交卷時一起拿到解析，成績單不用再問一次伺服器
+      if ('keys' in done) keyCache[done.examId] = done.keys;
+      delete done.keys;
       done.student = done.studentName;
       S.attempts = S.attempts.filter((x) => x.id !== id).concat([done]);
       lsDel(draftKey(id));

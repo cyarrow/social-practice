@@ -333,7 +333,7 @@
       }
       submitting = true;
       stage.className = 'qstage';
-      stage.replaceChildren(h('section', { class: 'qpane' }, h('p', { class: 'empty' }, auto ? '時間到，正在交卷並批改…' : '正在交卷並批改…')));
+      stage.replaceChildren(h('section', { class: 'qpane' }, h('p', { class: 'empty' }, auto ? '時間到，正在交卷並批改，請稍等幾秒…' : '正在交卷並批改，請稍等幾秒…')));
       try {
         await Store.saveProgress(id, { answers, flags, current: idx });
         await Store.submitAttempt(id, { auto });
