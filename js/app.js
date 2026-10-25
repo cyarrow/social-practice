@@ -26,6 +26,7 @@
   route('/t/new', Teacher.edit);
   route('/t/import', Teacher.import);
   route('/t/reports', Teacher.reports);
+  route('/t/attempt/:id', Teacher.attempt);
   route('/t/data', Teacher.data);
   route('/t/students', Teacher.students);
 

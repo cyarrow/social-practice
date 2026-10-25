@@ -42,6 +42,8 @@
         try {
           const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
           res = await r.json();
+          // 伺服器同時處理太多請求時會回「忙碌中」，稍等再試
+          if (res && !res.ok && res.code === 'busy' && i < tries - 1) { await wait(2000 * (i + 1)); continue; }
           break;
         } catch (e) {
           // Google 偶爾會連線失敗（尤其閒置後第一次呼叫），等一下再試
@@ -153,8 +155,10 @@
       if (isTeacherCtx()) return Store.getExam(id);
       const exam = await Store.getExam(id);
       if (!exam) return null;
-      if (!keyCache[id]) keyCache[id] = (await call('examKeys', { examId: id })).keys;
-      const keys = keyCache[id];
+      if (!keyCache[id]) keyCache[id] = await call('examKeys', { examId: id });
+      const { keys, sources } = keyCache[id];
+      // 新版後端交卷後才給資料來源；舊版後端會直接放在考卷裡
+      if (sources) exam.sources = sources;
       if (!keys) { exam.hasKeys = false; return exam; }
       Core.flatQuestions(exam).forEach(({ q }) => {
         if (keys[q.id]) { q.answer = keys[q.id].answer; q.explanation = keys[q.id].explanation; }
@@ -197,8 +201,11 @@
       return d ? Object.assign({}, a, { answers: d.answers, flags: d.flags, current: d.current }) : a;
     },
     async getAttempt(id) {
-      const list = await Store.listAttempts();
-      return list.find((a) => a.id === id) || null;
+      const find = async () => (await Store.listAttempts()).find((a) => a.id === id) || null;
+      let a = await find();
+      // 老師端的資料最多快取 15 秒；剛交的卷可能還不在裡面，重新抓一次
+      if (!a && isTeacherCtx()) { await ensureT(true); a = await find(); }
+      return a;
     },
     async startAttempt(exam) {
       const a = await call('startAttempt', { examId: exam.id });
@@ -221,8 +228,9 @@
       const cur = await Store.getAttempt(id);
       const done = await call('submit', { attemptId: id, answers: cur ? cur.answers : null, flags: cur ? cur.flags : null, auto: !!(opts && opts.auto) });
       // 交卷時一起拿到解析，成績單不用再問一次伺服器
-      if ('keys' in done) keyCache[done.examId] = done.keys;
+      if ('keys' in done) keyCache[done.examId] = { keys: done.keys, sources: done.sources };
       delete done.keys;
+      delete done.sources;
       done.student = done.studentName;
       S.attempts = S.attempts.filter((x) => x.id !== id).concat([done]);
       lsDel(draftKey(id));
@@ -274,7 +282,11 @@
         throw e;
       }
     },
-    async setTeacherPass(pass) { await call('t_changePassword', { password: pass }, true); },
+    async setTeacherPass(pass) {
+      const r = await call('t_changePassword', { password: pass }, true);
+      // 新版後端換密碼時會讓舊登入失效，並給這個分頁新的登入
+      if (r && r.token) setToken(r.token);
+    },
     teacherLoggedIn() {
       const t = getToken();
       if (!t) return false;

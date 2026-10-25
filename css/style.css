@@ -344,6 +344,17 @@ body.taking #app { height: 100%; }
 .stem-table table { border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .stem-table th, .stem-table td { border: 1px solid var(--rule); padding: 6px 14px; text-align: center; }
 .stem-table th { background: var(--ground); font-weight: 700; }
+/* 題目與題組的圖片：點圖開原圖；載入失敗時顯示替代文字 */
+.q-figure { margin: 0 0 20px; max-width: 100%; }
+.q-figure a { display: inline-block; max-width: 100%; vertical-align: top; }
+.q-figure img { display: block; max-width: 100%; max-height: 70vh; width: auto; height: auto; border: 1px solid var(--rule); background: var(--paper); }
+.q-figure figcaption { margin-top: 6px; font-family: var(--sans); font-size: var(--fs-xs); line-height: 1.6; color: var(--muted); }
+.q-figure .q-figure-missing { padding: 12px 14px; border: 1px dashed var(--rule); background: var(--ground); color: var(--muted); font-family: var(--sans); font-size: var(--fs-sm); line-height: 1.7; }
+.passage .q-figure { margin-top: 4px; }
+.image-preview .q-figure { margin: 0; }
+.image-preview .q-figure img { max-height: 180px; }
+.image-preview .hint { font-size: var(--fs-xs); color: var(--muted); }
+.image-preview .hint.err { color: var(--bad); }
 
 .options { display: grid; gap: 10px; }
 .opt {

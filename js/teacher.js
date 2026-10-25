@@ -1,4 +1,4 @@
-/* 老師端：密碼、總覽、考卷管理、編輯器、匯入、成績報表、資料管理。 */
+/* 老師端：密碼、總覽、考卷管理、編輯器、匯入、成績報表、作答明細、資料管理。 */
 (function () {
   'use strict';
   const { h, fmtScore, fmtDate, fmtDuration, pct, paras } = UI;
@@ -100,7 +100,10 @@
 
   /* ---------- 總覽 ---------- */
   async function home() {
-    const attempts = submittedOnly(await Store.listAttempts());
+    const everything = await Store.listAttempts();
+    const attempts = submittedOnly(everything);
+    // 正在作答、時間還沒到的考卷（不會即時更新，重新整理才會變）
+    const running = everything.filter((a) => a.status === 'in_progress' && !a.demo && Date.parse(a.deadline) > Date.now());
     const exams = await Store.listExams();
     const real = attempts.filter((a) => !a.demo);
     const scores = attempts.map((a) => pct(a.result.earned, a.result.max));
@@ -115,6 +118,9 @@
         h('p', { class: 'lede' }, Store.mode === 'remote' ?
           '學生交卷後，成績會自動存到你的 Google 試算表，這裡的數字也會跟著更新。' :
           '原型版本的成績只存在各自的電腦裡。學生在自己的筆電作答後，請他從「作答紀錄」匯出成績檔，你再到「匯入」頁匯進來。')),
+      running.length ? h('div', { style: { display: 'grid', gap: '10px', marginBottom: '20px' } }, running.map((a) =>
+        h('div', { class: 'notice quiet' }, h('div', null,
+          h('b', null, a.student), ` 正在寫〈${a.examTitle}〉，剩 ${Math.max(1, Math.ceil((Date.parse(a.deadline) - Date.now()) / 60000))} 分鐘`)))) : null,
       attempts.length ? null : h('div', { class: 'notice', style: { marginBottom: '20px' } },
         h('div', null, Store.mode === 'remote' ? '目前還沒有任何成績。學生交卷後就會出現在這裡；也可以先產生一組示範成績，看看報表長什麼樣子。' : '目前還沒有任何成績。可以先匯入學生的成績檔，或產生一組示範成績，看看報表長什麼樣子。'),
         h('div', { class: 'btn-row' },
@@ -141,13 +147,100 @@
 
   function attemptTable(list) {
     return h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
-      h('thead', null, h('tr', null, h('th', null, '交卷時間'), h('th', null, '學生'), h('th', null, '考卷'), h('th', { class: 'r' }, '分數'), h('th', { class: 'r' }, '用時'))),
+      h('thead', null, h('tr', null, h('th', null, '交卷時間'), h('th', null, '學生'), h('th', null, '考卷'), h('th', { class: 'r' }, '分數'), h('th', { class: 'r' }, '用時'), h('th', null, ''))),
       h('tbody', null, list.map((a) => h('tr', null,
         h('td', { class: 'num' }, fmtDate(a.submittedAt)),
         h('td', null, a.student, a.demo ? h('span', { class: 'pill', style: { marginLeft: '6px' } }, '示範') : null),
         h('td', null, a.examTitle),
         h('td', { class: 'r' }, `${fmtScore(a.result.earned)} / ${fmtScore(a.result.max)}`),
-        h('td', { class: 'r' }, fmtDuration(a.durationSec)))))));
+        h('td', { class: 'r' }, fmtDuration(a.durationSec)),
+        h('td', { class: 'nw' }, h('a', { class: 'btn small', href: '#/t/attempt/' + a.id, 'aria-label': `查看${a.student}的〈${a.examTitle}〉作答` }, '查看')))))));
+  }
+
+  /* ---------- 單次作答明細 ---------- */
+  // 考卷被刪掉時，題目內容看不到，只列出交卷時存下的每題作答
+  function perQTable(r) {
+    const rows = Object.values(r.perQ).sort((x, y) => (x.no || 0) - (y.no || 0));
+    return h('section', { class: 'panel', style: { marginTop: '20px' } },
+      h('h2', { class: 'panel-title' }, '逐題作答'),
+      h('div', { class: 'notice quiet', style: { marginBottom: '16px' } }, h('div', null, '這份考卷已經被刪除，看不到題目內容。下面是交卷時存下的每題作答。')),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', null, h('tr', null, h('th', null, '題號'), h('th', null, '課次'), h('th', null, '學生的答案'), h('th', null, '正解'), h('th', null, '結果'), h('th', { class: 'r' }, '得分'))),
+        h('tbody', null, rows.map((p) => {
+          const st = Student.STATUS[p.status] || Student.STATUS.blank;
+          return h('tr', null,
+            h('td', { class: 'num' }, p.no || '—'),
+            h('td', null, p.lesson || '—'),
+            h('td', null, p.chosen || '（沒有作答）'),
+            h('td', null, h('b', null, p.answer || '—')),
+            h('td', null, h('span', { class: 'pill ' + st.cls }, st.text)),
+            h('td', { class: 'r' }, `${fmtScore(p.earned)} / ${fmtScore(p.max)}`));
+        })))));
+  }
+
+  async function attempt({ id }) {
+    const a = await Store.getAttempt(id);
+    if (!a) throw new Error('找不到這筆作答紀錄，可能已經刪除了。');
+    // 老師端拿到的考卷含答案；考卷被刪掉時為 null
+    const exam = await Store.getExam(a.examId);
+    const done = a.status === 'submitted' && a.result;
+
+    async function remove() {
+      const ok = await UI.dialog({
+        title: '刪除這筆作答紀錄？',
+        body: `${a.student}在 ${fmtDate(a.submittedAt || a.startedAt)} 寫的〈${a.examTitle}〉會被刪除，無法復原。這次的分數會從成績報表和學生的作答紀錄裡消失。`,
+        ok: '刪除',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await Store.deleteAttempt(a.id);
+      } catch (e) {
+        UI.toast('刪除失敗：' + e.message, 4000);
+        return;
+      }
+      UI.toast('已刪除這筆作答紀錄');
+      UI.go('/t/reports');
+    }
+
+    const pill = (text, cls) => h('span', { class: 'pill' + (cls ? ' ' + cls : '') }, text);
+    const blocks = [
+      h('p', { style: { marginBottom: '20px' } }, h('a', { href: '#/t/reports', class: 'muted' }, '← 回成績報表')),
+      h('div', { class: 'page-head' },
+        h('span', { class: 'eyebrow' }, '作答明細' + (a.subject ? ' · ' + a.subject : '')),
+        h('h1', { class: 'page-title' }, a.examTitle),
+        h('p', { class: 'lede' },
+          h('b', null, a.student),
+          done ? `　交卷 ${fmtDate(a.submittedAt)}　用時 ${fmtDuration(a.durationSec)}` : `　開始 ${fmtDate(a.startedAt)}`),
+        a.demo || a.autoSubmitted || !done ? h('div', { class: 'btn-row' },
+          !done ? pill('作答中', 'solid') : null,
+          a.autoSubmitted ? pill('時間到自動交卷') : null,
+          a.demo ? pill('示範') : null) : null),
+    ];
+    if (done) {
+      const r = a.result;
+      const c = Student.statusCounts(r);
+      blocks.push(
+        Student.scoreHero(r, [
+          ['答對', `${c.correct} / ${c.total} 題`],
+          ['部分得分', `${c.partial} 題`],
+          ['答錯', `${c.wrong} 題`],
+          ['未作答', `${c.blank} 題`],
+          ['得分率', pct(r.earned, r.max) + '%'],
+        ]),
+        Student.breakdown(r),
+        // 老師一律看得到答案與解析
+        exam ? Student.reviewPanel(r, exam, true, { teacher: true }) : perQTable(r));
+    } else {
+      blocks.push(h('div', { class: 'notice quiet' }, h('div', null, Date.parse(a.deadline) > Date.now() ?
+        `學生還在作答，交卷後才看得到成績。剩 ${Math.max(1, Math.ceil((Date.parse(a.deadline) - Date.now()) / 60000))} 分鐘。` :
+        '作答時間已經到了，但還沒批改。學生下次打開網站時，系統會自動交卷。')));
+    }
+    blocks.push(h('section', { class: 'panel', style: { marginTop: '28px' } },
+      h('h2', { class: 'panel-title' }, '刪除紀錄'),
+      h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginBottom: '16px' } }, '測試用或寫錯的紀錄可以刪掉。刪除後無法復原，分數也不會再算進報表。'),
+      h('button', { class: 'btn danger', type: 'button', onclick: remove }, '刪除這筆作答紀錄')));
+    await shell('reports', blocks);
   }
 
   function lessonStats(attempts) {
@@ -251,7 +344,7 @@
       lastGroup = group;
       return h('article', { class: 'review-item' },
         showGroup ? h('div', { class: 'explain', style: { marginTop: 0, marginBottom: '16px', background: 'var(--ground)' } },
-          h('h4', null, '題組文章'), h('p', { style: { fontWeight: 700 } }, group.title), paras(group.passage.join('\n'))) : null,
+          h('h4', null, '題組文章'), h('p', { style: { fontWeight: 700 } }, group.title), UI.passageBody(group)) : null,
         h('div', { class: 'qhead' },
           h('span', null, h('span', { class: 'qno' }, no), ' ', h('span', { class: 'qtype' }, `${UI.typeLabel(q)} · ${fmtScore(q.points)} 分${q.lesson ? ' · ' + q.lesson : ''}`))),
         UI.stemBlock(q),
@@ -268,7 +361,7 @@
       h('section', { class: 'panel' }, h('div', { class: 'review' }, items)),
       e.sources && e.sources.length ? h('section', { class: 'panel', style: { marginTop: '20px' } },
         h('h2', { class: 'panel-title' }, '時事題資料來源'),
-        h('ul', { class: 'sources', style: { padding: 0 } }, e.sources.map((s) => h('li', null, s.ref ? h('b', null, s.ref + '：') : null, s.title, ' ', h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.url))))) : null));
+        h('ul', { class: 'sources', style: { padding: 0 } }, e.sources.map((s) => h('li', null, s.ref ? h('b', null, s.ref + '：') : null, s.title, ' ', UI.extLink(s.url))))) : null));
   }
 
   /* ---------- 編輯器 ---------- */
@@ -313,6 +406,34 @@
     }
     let fid = 0;
     const nid = () => 'f' + (++fid);
+
+    // 題目或題組的圖片：路徑留空就是不放圖（直接刪掉 image，不留空物件）
+    function imageFields(obj, label) {
+      let src = obj.image ? obj.image.src || '' : '';
+      let alt = obj.image ? obj.image.alt || '' : '';
+      const preview = h('div', { class: 'image-preview' });
+      function drawPreview() {
+        const s = src.trim();
+        if (!s) preview.replaceChildren();
+        else if (!Core.isImageSrc(s)) preview.replaceChildren(h('p', { class: 'hint err' }, '路徑要寫成 images/檔名，或用 https:// 開頭的網址。'));
+        else preview.replaceChildren(...[UI.figure({ src: s, alt: alt.trim() || '（還沒寫替代文字）' }),
+          alt.trim() ? null : h('p', { class: 'hint err' }, '請寫替代文字，說明圖片的內容。')].filter(Boolean));
+      }
+      function sync() {
+        if (src.trim()) obj.image = { src: src.trim(), alt: alt.trim() };
+        else delete obj.image;
+        dirty = true;
+        drawPreview();
+      }
+      drawPreview();
+      return h('details', { open: !!obj.image }, h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: 'var(--fs-sm)' } }, label),
+        h('div', { style: { marginTop: '8px', display: 'grid', gap: '12px' } },
+          h('div', { class: 'form-grid', style: { alignItems: 'start' } },
+            field('圖片路徑或網址', h('input', { class: 'input', id: nid(), value: src, placeholder: 'images/geo-l1-terrain.png', oninput: (ev) => { src = ev.target.value; sync(); } }),
+              '圖片檔放在 images/ 資料夾，或用 https:// 網址。留空就是不放圖。'),
+            field('圖片說明（替代文字）', h('input', { class: 'input', id: nid(), value: alt, placeholder: '例如：臺灣地形分區圖', oninput: (ev) => { alt = ev.target.value; sync(); } }))),
+          preview));
+    }
 
     function questionEditor(q, no, list, idx) {
       const optBox = h('div', { style: { display: 'grid', gap: '8px' } });
@@ -362,6 +483,7 @@
         field('題幹', h('textarea', { class: 'input', id: nid(), oninput: bind(q, 'stem') }, q.stem)),
         h('details', { open: !!q.table }, h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: 'var(--fs-sm)' } }, '題幹表格（選填）'),
           h('div', { style: { marginTop: '8px' } }, field('每列用「|」分隔，第一列是表頭', tableTa))),
+        imageFields(q, '題目圖片（選填）'),
         h('div', { class: 'field' }, h('span', { class: 'label' }, q.type === 'multi' ? '選項（勾選所有正確答案）' : '選項（點選正確答案）'), optBox),
         field('解析', h('textarea', { class: 'input', id: nid(), oninput: bind(q, 'explanation') }, q.explanation || '')));
     }
@@ -381,6 +503,7 @@
                   h('button', { class: 'btn small ghost', type: 'button', onclick: () => { sec.items.splice(ii, 1); dirty = true; draw(); } }, '刪除題組'))),
               field('題組標題', h('input', { class: 'input', id: nid(), value: item.title, oninput: bind(item, 'title') })),
               field('文章（每段一行）', h('textarea', { class: 'input', id: nid(), style: { minHeight: '160px' }, oninput: (ev) => { item.passage = ev.target.value.split('\n').map((s) => s.trim()).filter(Boolean); dirty = true; } }, item.passage.join('\n'))),
+              imageFields(item, '題組圖片（選填，顯示在文章下面）'),
               qs,
               h('div', null, h('button', { class: 'btn small', type: 'button', onclick: () => { item.questions.push(blankQuestion('single', item.questions[0] ? item.questions[0].points : 3)); dirty = true; draw(); } }, '＋ 題組內加一題')));
           }
@@ -570,6 +693,7 @@
           h('p', null, h('b', null, '題目'), '：', h('code', null, '1. 題幹'), '，接著 ', h('code', null, '(A)'), ' 到 ', h('code', null, '(E)'), ' 選項，再寫 ', h('code', null, '答案：'), '、', h('code', null, '解析：'), '、', h('code', null, '課次：'), '、', h('code', null, '出處：'), '、', h('code', null, '配分：'), '。'),
           h('p', null, h('b', null, '題組'), '：', h('code', null, '【題組一：標題】'), '一行，下面到第一個題號之前都是文章；題組裡的多選題加 ', h('code', null, '題型：多選'), '。'),
           h('p', null, h('b', null, '表格'), '：題幹下面用 ', h('code', null, '| 欄 | 欄 |'), ' 每列一行，第一列是表頭。'),
+          h('p', null, h('b', null, '圖片'), '：題幹下面（選項前）寫 ', h('code', null, '圖片：images/檔名.png | 替代文字'), '；寫在題組文章裡就是題組的圖。每題最多一張。'),
           h('p', { class: 'muted' }, '多選題一律依學測方式計分。'))));
   }
 
@@ -886,6 +1010,13 @@
     const attempts = submittedOnly(await Store.listAttempts()).filter((a) => !a.demo);
     const nameInput = h('input', { class: 'input', id: 'new-student', maxlength: 20, placeholder: '例如：王小明' });
 
+    // 交卷次數點下去，打開只看這位學生的成績報表
+    function countLink(s) {
+      const n = attempts.filter((a) => a.studentId === s.studentId).length;
+      if (!n) return n;
+      return h('a', { href: '#/t/reports', title: `看${s.name}的成績報表`, onclick: () => { Store.pref('repStudent', s.name); Store.pref('repExam', ''); } }, n);
+    }
+
     function linkBox(s) {
       const url = Store.studentLink(s.code);
       const field = h('input', { class: 'input', readonly: true, value: url, 'aria-label': s.name + ' 的專屬連結', style: { fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }, onfocus: (e) => e.target.select() });
@@ -951,7 +1082,7 @@
           h('td', { class: 'nw' }, h('b', null, s.name)),
           h('td', null, s.active ? linkBox(s) : h('span', { class: 'muted' }, '已停用')),
           h('td', { class: 'nw' }, h('span', { class: 'pill ' + (s.active ? 'good' : '') }, s.active ? '使用中' : '已停用')),
-          h('td', { class: 'r' }, attempts.filter((a) => a.studentId === s.studentId).length),
+          h('td', { class: 'r' }, countLink(s)),
           h('td', { class: 'nw' }, h('div', { class: 'btn-row' },
             h('button', { class: 'btn small ghost', type: 'button', onclick: () => rename(s) }, '改名'),
             s.active ? h('button', { class: 'btn small ghost', type: 'button', onclick: () => reset(s) }, '換新連結') : null,
@@ -968,6 +1099,7 @@
     edit: guard(edit),
     import: guard(importPage),
     reports: guard(reports),
+    attempt: guard(attempt),
     data: guard(data),
   };
 })();

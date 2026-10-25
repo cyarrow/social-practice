@@ -4,7 +4,8 @@
   const { h, fmtScore, fmtClock, fmtDuration, fmtDate, pct, paras } = UI;
   const Core = window.Core;
   const Store = window.Store;
-  const APP_NAME = '社會科練習室';
+  const APP_NAME = (window.CONFIG && window.CONFIG.appName) || '社會科練習室';
+  document.title = APP_NAME;
   const SUBJECTS = ['全部', '地理', '歷史', '公民', '綜合'];
 
   /* ---------- 版面 ---------- */
@@ -278,14 +279,17 @@
     }
 
     let lastGroup = null;
+    const figures = new Map(); // 作答時重畫題目沿用同一張圖，不重新載入
     function drawStage(scrollTop) {
       const { q, no, group } = flat[idx];
+      const oldPane = stage.querySelector('.qpane');
+      const paneScroll = !scrollTop && oldPane ? oldPane.scrollTop : 0;
       const isMulti = q.type === 'multi';
       const qBlock = h('div', { class: 'qpane-inner' },
         h('div', { class: 'qhead' },
           h('span', { class: 'qno' }, no),
           h('span', { class: 'qtype' }, `${UI.typeLabel(q)} · ${fmtScore(q.points)} 分`)),
-        UI.stemBlock(q),
+        UI.stemBlock(q, { figures }),
         isMulti ? h('p', { class: 'multi-hint' }, '可選多個答案；依學測方式計分，選錯會扣分。') : null,
         UI.optionList(q, { chosen: answers[q.id], onChoose: choose }),
         h('div', { class: 'qfoot' },
@@ -298,23 +302,27 @@
           '鍵盤：', h('kbd', null, 'A'), '–', h('kbd', null, isMulti ? 'E' : 'D'), ' 選答案　', h('kbd', null, '←'), h('kbd', null, '→'), ' 換題　', h('kbd', null, 'F'), ' 標記'));
 
       if (group) {
-        const keepPassage = lastGroup === group && stage.querySelector('.passage');
-        const passageScroll = keepPassage ? stage.querySelector('.passage').scrollTop : 0;
-        const nums = flat.filter((x) => x.group === group).map((x) => x.no);
-        const passage = h('section', { class: 'passage', 'aria-label': '題組文章' },
-          h('span', { class: 'tag' }, `第 ${nums[0]}–${nums[nums.length - 1]} 題共用`),
-          h('h2', null, group.title),
-          paras(group.passage.join('\n')));
         const pane = h('section', { class: 'qpane' }, qBlock);
-        stage.className = 'qstage split';
-        stage.replaceChildren(passage, pane);
-        passage.scrollTop = passageScroll;
+        const oldPassage = lastGroup === group && stage.querySelector('.passage');
+        if (oldPassage) {
+          // 同一個題組換題時只換右邊的題目，文章（和圖片）留著，捲動位置也不會跳
+          stage.querySelector('.qpane').replaceWith(pane);
+        } else {
+          const nums = flat.filter((x) => x.group === group).map((x) => x.no);
+          const passage = h('section', { class: 'passage', 'aria-label': '題組文章' },
+            h('span', { class: 'tag' }, `第 ${nums[0]}–${nums[nums.length - 1]} 題共用`),
+            h('h2', null, group.title),
+            UI.passageBody(group));
+          stage.className = 'qstage split';
+          stage.replaceChildren(passage, pane);
+        }
       } else {
         stage.className = 'qstage';
         stage.replaceChildren(h('section', { class: 'qpane' }, qBlock));
       }
       lastGroup = group;
       if (scrollTop) stage.querySelectorAll('.qpane').forEach((p) => { p.scrollTop = 0; });
+      else if (paneScroll) stage.querySelector('.qpane').scrollTop = paneScroll;
     }
     function draw(scrollTop) { drawNav(); drawStage(scrollTop); }
 
@@ -400,22 +408,54 @@
     blank: { text: '未作答', cls: '' },
   };
 
-  async function result({ id }) {
-    const a = await Store.getAttempt(id);
-    if (!a) throw new Error('找不到這次作答紀錄。');
-    if (a.status !== 'submitted') { UI.go('/take/' + id); return; }
-    const exam = await Store.getReviewExam(a.examId);
-    const r = a.result;
-    const reveal = canReveal(exam) && exam.hasKeys !== false;
+  // 每種作答結果各有幾題
+  function statusCounts(r) {
     const per = Object.values(r.perQ);
-    const count = (s) => per.filter((p) => p.status === s).length;
-    let filter = 'all';
+    const c = { total: per.length };
+    Object.keys(STATUS).forEach((k) => { c[k] = per.filter((p) => p.status === k).length; });
+    return c;
+  }
 
+  // 分數與統計；items 是 [標題, 內容] 的清單（老師端的作答明細也用這個）
+  function scoreHero(r, items) {
+    return h('section', { class: 'panel' },
+      h('div', { class: 'score-hero' },
+        h('div', { class: 'score' }, h('b', null, fmtScore(r.earned)), h('span', null, '/ ' + fmtScore(r.max))),
+        h('dl', { class: 'score-meta', style: { margin: 0 } }, items.map(([k, v]) => h('div', null, h('dt', null, k), h('dd', null, v))))));
+  }
+
+  // 各大題得分表與各課次得分率
+  function breakdown(r) {
+    const lessons = Object.entries(r.byLesson || {}).sort((x, y) => x[0].localeCompare(y[0], 'zh-Hant', { numeric: true }));
+    return h('div', { class: 'grid-halves', style: { marginTop: '20px' } },
+      h('section', { class: 'panel' },
+        h('h2', { class: 'panel-title' }, '各大題得分'),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+          h('thead', null, h('tr', null, h('th', null, '大題'), h('th', { class: 'r' }, '得分'), h('th', { class: 'r' }, '得分率'))),
+          h('tbody', null, (r.bySection || []).map((s) => h('tr', null,
+            h('td', null, s.title), h('td', { class: 'r' }, `${fmtScore(s.earned)} / ${fmtScore(s.max)}`), h('td', { class: 'r' }, pct(s.earned, s.max) + '%'))))))),
+      h('section', { class: 'panel' },
+        h('h2', { class: 'panel-title' }, '各課次得分率', h('small', null, '低於 60% 以紅色標示')),
+        h('div', { class: 'bars' }, lessons.map(([L, s]) => {
+          const p = pct(s.earned, s.max);
+          return h('div', { class: 'bar-row' },
+            h('span', { class: 'lbl' }, L),
+            h('div', { class: 'bar-track', title: `${L}：${fmtScore(s.earned)} / ${fmtScore(s.max)} 分` }, h('div', { class: 'bar-fill' + (p < 60 ? ' low' : ''), style: { width: p + '%' } })),
+            h('span', { class: 'val' }, `${p}%`));
+        }))));
+  }
+
+  // 逐題檢討：篩選鈕＋每題的作答與解析
+  // opts.note：放在題目上方的提醒；opts.teacher：老師看的版本（用「學生」稱呼）
+  function reviewPanel(r, exam, reveal, opts) {
+    opts = opts || {};
+    const c = statusCounts(r);
+    let filter = 'all';
     const reviewBox = h('div', { class: 'review' });
     const filterBox = h('div', { class: 'chips', role: 'group', 'aria-label': '篩選題目' });
-    function drawReview() {
-      const opts = [['all', '全部'], ['miss', `答錯與部分得分（${count('wrong') + count('partial')}）`], ['blank', `未作答（${count('blank')}）`]];
-      filterBox.replaceChildren(...opts.map(([k, t]) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(filter === k), onclick: () => { filter = k; drawReview(); } }, t)));
+    function draw() {
+      const list = [['all', '全部'], ['miss', `答錯與部分得分（${c.wrong + c.partial}）`], ['blank', `未作答（${c.blank}）`]];
+      filterBox.replaceChildren(...list.map(([k, t]) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(filter === k), onclick: () => { filter = k; draw(); } }, t)));
       if (!exam) { reviewBox.replaceChildren(h('p', { class: 'empty' }, '這份考卷已被移除，無法顯示題目。')); return; }
       const flat = Core.flatQuestions(exam).filter(({ q }) => {
         const p = r.perQ[q.id];
@@ -424,72 +464,69 @@
         if (filter === 'blank') return p.status === 'blank';
         return true;
       });
-      reviewBox.replaceChildren(...(flat.length ? flat.map((x) => reviewItem(x, r.perQ[x.q.id], reveal)) : [h('p', { class: 'empty' }, '沒有符合的題目。')]));
+      reviewBox.replaceChildren(...(flat.length ? flat.map((x) => reviewItem(x, r.perQ[x.q.id], reveal, opts)) : [h('p', { class: 'empty' }, '沒有符合的題目。')]));
     }
-    drawReview();
+    draw();
+    return h('section', { class: 'panel', style: { marginTop: '20px' } },
+      h('div', { class: 'panel-title', style: { justifyContent: 'space-between' } }, h('h2', null, '逐題檢討'), filterBox),
+      opts.note || null,
+      reviewBox);
+  }
 
-    const lessons = Object.entries(r.byLesson).sort((x, y) => x[0].localeCompare(y[0], 'zh-Hant', { numeric: true }));
+  async function result({ id }) {
+    const a = await Store.getAttempt(id);
+    if (!a) throw new Error('找不到這次作答紀錄。');
+    if (a.status !== 'submitted') { UI.go('/take/' + id); return; }
+    const exam = await Store.getReviewExam(a.examId);
+    const r = a.result;
+    const reveal = canReveal(exam) && exam.hasKeys !== false;
+    const c = statusCounts(r);
+
     await shell('history', [
       h('p', { style: { marginBottom: '20px' } }, h('a', { href: '#/', class: 'muted' }, '← 回考卷列表')),
       h('div', { class: 'page-head' },
         h('span', { class: 'eyebrow' }, '成績單 · ' + (a.subject || '')),
         h('h1', { class: 'page-title' }, a.examTitle)),
       a.autoSubmitted ? h('div', { class: 'notice', style: { marginBottom: '20px' } }, h('div', null, '作答時間到，系統已自動交卷。')) : null,
-      h('section', { class: 'panel' },
-        h('div', { class: 'score-hero' },
-          h('div', { class: 'score' }, h('b', null, fmtScore(r.earned)), h('span', null, '/ ' + fmtScore(r.max))),
-          h('dl', { class: 'score-meta', style: { margin: 0 } },
-            h('div', null, h('dt', null, '答對'), h('dd', null, `${count('correct')} / ${per.length} 題`)),
-            h('div', null, h('dt', null, '部分得分'), h('dd', null, `${count('partial')} 題`)),
-            h('div', null, h('dt', null, '未作答'), h('dd', null, `${count('blank')} 題`)),
-            h('div', null, h('dt', null, '作答時間'), h('dd', null, fmtDuration(a.durationSec))),
-            h('div', null, h('dt', null, '交卷時間'), h('dd', null, fmtDate(a.submittedAt))),
-            h('div', null, h('dt', null, '作答者'), h('dd', null, a.student))))),
-      h('div', { class: 'grid-halves', style: { marginTop: '20px' } },
-        h('section', { class: 'panel' },
-          h('h2', { class: 'panel-title' }, '各大題得分'),
-          h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
-            h('thead', null, h('tr', null, h('th', null, '大題'), h('th', { class: 'r' }, '得分'), h('th', { class: 'r' }, '得分率'))),
-            h('tbody', null, r.bySection.map((s) => h('tr', null,
-              h('td', null, s.title), h('td', { class: 'r' }, `${fmtScore(s.earned)} / ${fmtScore(s.max)}`), h('td', { class: 'r' }, pct(s.earned, s.max) + '%'))))))),
-        h('section', { class: 'panel' },
-          h('h2', { class: 'panel-title' }, '各課次得分率', h('small', null, '低於 60% 以紅色標示')),
-          h('div', { class: 'bars' }, lessons.map(([L, s]) => {
-            const p = pct(s.earned, s.max);
-            return h('div', { class: 'bar-row' },
-              h('span', { class: 'lbl' }, L),
-              h('div', { class: 'bar-track', title: `${L}：${fmtScore(s.earned)} / ${fmtScore(s.max)} 分` }, h('div', { class: 'bar-fill' + (p < 60 ? ' low' : ''), style: { width: p + '%' } })),
-              h('span', { class: 'val' }, `${p}%`));
-          })))),
-      h('section', { class: 'panel', style: { marginTop: '20px' } },
-        h('div', { class: 'panel-title', style: { justifyContent: 'space-between' } }, h('h2', null, '逐題檢討'), filterBox),
-        reveal ? null : h('div', { class: 'notice quiet', style: { marginBottom: '8px' } }, h('div', null, '老師還沒開放這份考卷的答案與解析。你可以先看哪些題目答錯，想一想再問老師。')),
-        reviewBox),
+      scoreHero(r, [
+        ['答對', `${c.correct} / ${c.total} 題`],
+        ['部分得分', `${c.partial} 題`],
+        ['未作答', `${c.blank} 題`],
+        ['作答時間', fmtDuration(a.durationSec)],
+        ['交卷時間', fmtDate(a.submittedAt)],
+        ['作答者', a.student],
+      ]),
+      breakdown(r),
+      reviewPanel(r, exam, reveal, {
+        note: reveal ? null : h('div', { class: 'notice quiet', style: { marginBottom: '8px' } }, h('div', null, '老師還沒開放這份考卷的答案與解析。你可以先看哪些題目答錯，想一想再問老師。')),
+      }),
       reveal && exam && exam.sources && exam.sources.length ? h('section', { class: 'panel', style: { marginTop: '20px' } },
         h('h2', { class: 'panel-title' }, '時事題資料來源'),
         h('ul', { class: 'sources', style: { padding: 0 } }, exam.sources.map((s) =>
-          h('li', null, s.ref ? h('b', null, s.ref + '：') : null, s.title, ' ', h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.url))))) : null,
+          h('li', null, s.ref ? h('b', null, s.ref + '：') : null, s.title, ' ', UI.extLink(s.url))))) : null,
       h('div', { class: 'btn-row', style: { marginTop: '28px' } },
         exam ? h('a', { class: 'btn primary', href: '#/exam/' + exam.id }, '再寫一次') : null,
-        count('wrong') + count('partial') ? h('a', { class: 'btn', href: '#/practice/' + a.examId }, '練這份的錯題') : null,
+        c.wrong + c.partial ? h('a', { class: 'btn', href: '#/practice/' + a.examId }, '練這份的錯題') : null,
         Store.features.exportResults ? h('button', { class: 'btn ghost', type: 'button', onclick: () => exportResults() }, '匯出成績檔給老師') : null),
     ]);
   }
 
-  function reviewItem({ q, no, group }, p, reveal) {
+  // opts.teacher：老師看的版本，「你」改成「學生」
+  function reviewItem({ q, no, group }, p, reveal, opts) {
     const st = STATUS[p.status] || STATUS.blank;
+    const who = opts && opts.teacher ? '學生' : '你';
     return h('article', { class: 'review-item' },
       h('div', { class: 'qhead' },
         h('span', null, h('span', { class: 'qno' }, no), ' ', h('span', { class: 'qtype' }, `${UI.typeLabel(q)}${q.lesson ? ' · ' + q.lesson : ''}`)),
         h('span', { class: 'btn-row' }, h('span', { class: 'pill ' + st.cls }, st.text), h('span', { class: 'num muted', style: { fontSize: 'var(--fs-sm)' } }, `${fmtScore(p.earned)} / ${fmtScore(p.max)} 分`))),
-      group ? h('details', { class: 'passage-box' }, h('summary', null, '題組文章：' + group.title), h('div', null, paras(group.passage.join('\n')))) : null,
+      group ? h('details', { class: 'passage-box' }, h('summary', null, '題組文章：' + group.title), h('div', null, UI.passageBody(group))) : null,
       UI.stemBlock(q),
-      UI.optionList(q, { chosen: p.chosen, reveal: { answer: q.answer, showAnswer: reveal } }),
+      UI.optionList(q, { chosen: p.chosen, reveal: { answer: q.answer, showAnswer: reveal }, who }),
       reveal ? h('div', { class: 'explain' },
-        h('h4', null, `解析　正確答案 ${q.answer}${p.chosen ? `　你的答案 ${p.chosen}` : '　你沒有作答'}`),
+        h('h4', null, `解析　正確答案 ${q.answer}${p.chosen ? `　${who}的答案 ${p.chosen}` : `　${who}沒有作答`}`),
         paras(q.explanation || '（這題沒有解析）'),
         q.ref ? h('p', { class: 'ref' }, '出處：' + q.ref) : null) :
-        h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginTop: '10px' } }, p.chosen ? `你的答案：${p.chosen}` : '你沒有作答'));
+        h('p', { class: 'muted', style: { fontSize: 'var(--fs-sm)', marginTop: '10px' } }, p.chosen ? `${who}的答案：${p.chosen}` : `${who}沒有作答`));
   }
 
   async function exportResults() {
@@ -572,7 +609,7 @@
         h('div', { class: 'qhead', style: { justifyContent: 'space-between' } },
           h('span', null, h('span', { class: 'qno' }, `${i + 1}`), h('span', { class: 'qtype' }, ` / ${items.length}　${it.exam.title} 第 ${it.no} 題 · ${UI.typeLabel(q)}`)),
           h('span', { class: 'pill' }, '上次：' + STATUS[it.status].text)),
-        it.group ? h('details', { class: 'passage-box', open: true }, h('summary', null, '題組文章：' + it.group.title), h('div', null, paras(it.group.passage.join('\n')))) : null,
+        it.group ? h('details', { class: 'passage-box', open: true }, h('summary', null, '題組文章：' + it.group.title), h('div', null, UI.passageBody(it.group))) : null,
         UI.stemBlock(q),
         UI.optionList(q, {
           chosen,
@@ -669,5 +706,5 @@
       h('footer', { class: 'footer' }, h('div', { class: 'wrap' }, h('span', null, ''), h('a', { href: '#/t' }, '老師專區'))));
   }
 
-  window.Student = { home, intro, take, result, wrong, practice, history, enter, landing, APP_NAME, canReveal, STATUS, reviewItem };
+  window.Student = { home, intro, take, result, wrong, practice, history, enter, landing, APP_NAME, canReveal, STATUS, reviewItem, statusCounts, scoreHero, breakdown, reviewPanel };
 })();

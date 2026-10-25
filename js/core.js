@@ -37,8 +37,17 @@
     return Math.round(n * 100) / 100;
   }
 
+  // 只留下 A–H、去掉重複並排序；數字、物件之類的輸入一律當成沒作答
   function normAnswer(a) {
-    return (a || '').toUpperCase().split('').filter((c) => LETTERS.includes(c)).sort().join('');
+    if (Array.isArray(a)) a = a.filter((x) => typeof x === 'string').join('');
+    if (typeof a !== 'string') return '';
+    const s = a.slice(0, 64).toUpperCase();
+    return [...new Set(s.split('').filter((c) => LETTERS.includes(c)))].sort().join('');
+  }
+
+  // 網址只接受 http:// 或 https:// 開頭（擋掉 javascript: 之類的連結）
+  function isWebUrl(u) {
+    return typeof u === 'string' && /^https?:\/\/[^\s<>"']+$/i.test(u.trim());
   }
 
   /* ---------- 計分 ---------- */
@@ -127,6 +136,27 @@
     return copy;
   }
 
+  /* ---------- 圖片 ----------
+   * image: { src, alt }。src 只能是 images/ 底下的相對路徑，或 https:// 網址；
+   * 不接受 http:、javascript:、data: 等其他寫法，也不能用 .. 跳出 images/。
+   */
+  function isImageSrc(src) {
+    if (typeof src !== 'string' || !src || /[\\<>"'\u0000-\u001f]/.test(src)) return false;
+    if (/^https:\/\/[^/\s]+/i.test(src)) return true;
+    return /^images\/[^/]/.test(src) && !src.includes('..') && !/\/$/.test(src);
+  }
+  // 回傳圖片設定的問題（空陣列表示沒問題）
+  function imageErrors(img) {
+    if (img === undefined || img === null) return [];
+    if (typeof img !== 'object') return ['圖片格式不對'];
+    const errs = [];
+    const src = typeof img.src === 'string' ? img.src.trim() : '';
+    if (!src) errs.push('圖片沒有路徑或網址');
+    else if (!isImageSrc(src)) errs.push(`圖片要放在 images/ 資料夾（寫成 images/檔名），或用 https:// 開頭的網址（目前是「${src.slice(0, 40)}」）`);
+    if (typeof img.alt !== 'string' || !img.alt.trim()) errs.push('圖片沒有替代文字');
+    return errs;
+  }
+
   /* ---------- 檢查考卷資料 ---------- */
   function validateExam(exam) {
     const errs = [];
@@ -147,6 +177,14 @@
         errs.push(`${tag}：答案超出選項範圍`);
       }
       if (!(q.points > 0)) errs.push(`${tag}：配分需大於 0`);
+      imageErrors(q.image).forEach((e) => errs.push(`${tag}：${e}`));
+    });
+    (exam.sections || []).forEach((sec) => (sec.items || []).forEach((item) => {
+      if (item.type !== 'group') return;
+      imageErrors(item.image).forEach((e) => errs.push(`題組「${item.title || '未命名'}」：${e}`));
+    }));
+    (exam.sources || []).forEach((src, i) => {
+      if (!isWebUrl(src && src.url)) errs.push(`資料來源第 ${i + 1} 筆：網址要用 http:// 或 https:// 開頭`);
     });
     return errs;
   }
@@ -158,6 +196,7 @@
    *   ## 單選題 2        ← 大題，數字是每題配分
    *   1. 題幹
    *   | 表頭 | 表頭 |     ← 題幹裡的表格（第一列為表頭）
+   *   圖片：images/檔名.png | 替代文字   ← 寫在題幹下面（選項前）；寫在題組文章裡就是題組的圖
    *   (A) 選項 ……
    *   答案：C   解析：……   課次：L5   出處：講義 p.24   配分：3   題型：多選
    *   ## 題組 3
@@ -239,6 +278,18 @@
         field = 'stem';
         return;
       }
+      if ((m = line.match(/^圖片\s*[:：]\s*(.*)$/)) && (q || group)) {
+        if (q && q.options.length) { errors.push(`第 ${ln} 行：圖片要寫在題幹下面、選項前面`); return; }
+        const target = q || group;
+        const bar = m[1].indexOf('|');
+        const src = (bar < 0 ? m[1] : m[1].slice(0, bar)).trim();
+        const alt = bar < 0 ? '' : m[1].slice(bar + 1).trim();
+        if (target.image) errors.push(`第 ${ln} 行：${q ? '每題' : '每個題組'}只能放一張圖`);
+        else if (!src) errors.push(`第 ${ln} 行：圖片沒有寫路徑或網址`);
+        else if (!alt) errors.push(`第 ${ln} 行：圖片要寫替代文字，格式是「圖片：路徑或網址 | 替代文字」`);
+        else target.image = { src, alt };
+        return;
+      }
       if (!q) {
         if (group) { group.passage.push(line); return; }
         errors.push(`第 ${ln} 行：不知道這行屬於哪一題（「${line.slice(0, 20)}」）`);
@@ -299,7 +350,7 @@
   function letter(i) { return LETTERS[i]; }
 
   return {
-    LETTERS, letter, flatQuestions, maxScore, normAnswer, scoreMulti, scoreQuestion, grade,
-    sealExam, unsealExam, validateExam, parseText, uid, round2,
+    LETTERS, letter, flatQuestions, maxScore, normAnswer, isWebUrl, scoreMulti, scoreQuestion, grade,
+    sealExam, unsealExam, validateExam, parseText, uid, round2, isImageSrc, imageErrors,
   };
 });

@@ -73,22 +73,40 @@
     else location.hash = path;
   }
   function currentPath() { return decodeURIComponent((location.hash || '#/').slice(1)) || '/'; }
+  // 每次換頁編一個號碼。試算表模式下頁面要等伺服器回應，
+  // 如果等待中又換了頁，舊頁面晚到時不能蓋掉新頁面。
+  let seq = 0;
+  let lastDone = 0;
   async function render() {
     if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; }
+    const token = ++seq;
     const path = currentPath();
     for (const r of routes) {
       const m = path.match(r.re);
       if (m) {
         const params = {};
         r.keys.forEach((k, i) => { params[k] = m[i + 1]; });
+        let c;
+        let err = null;
         try {
-          const c = await r.handler(params);
-          if (typeof c === 'function') cleanup = c;
+          c = await r.handler(params);
         } catch (e) {
-          console.error(e);
-          if (e && e.code === 'auth') { go('/t'); return; }
-          showError(e);
+          err = e;
         }
+        if (token !== seq) {
+          // 已經換頁了：收掉這一頁的計時器等資源；若新頁面已經畫好又被蓋掉，就重畫一次
+          if (typeof c === 'function') { try { c(); } catch (e) { console.error(e); } }
+          if (lastDone > token) render();
+          return;
+        }
+        lastDone = token;
+        if (err) {
+          console.error(err);
+          if (err.code === 'auth') { go('/t'); return; }
+          showError(err);
+          return;
+        }
+        if (typeof c === 'function') cleanup = c;
         return;
       }
     }
@@ -180,12 +198,42 @@
     });
   }
 
+  /* ---------- 圖片 ---------- */
+  // 題目或題組的圖片：點圖片會在新分頁開原圖；載入失敗時改顯示替代文字。
+  // cache（Map）：同一頁重畫時沿用已載入的圖片元素，版面不會因為重新載圖而跳動
+  function figure(img, cache) {
+    const src = img && typeof img.src === 'string' ? img.src.trim() : '';
+    if (!src || !Core.isImageSrc(src)) return null;
+    const alt = img.alt || '';
+    const key = src + '\n' + alt;
+    if (cache && cache.has(key)) return cache.get(key);
+    const fig = h('figure', { class: 'q-figure' });
+    const pic = h('img', {
+      alt,
+      loading: 'lazy',
+      onerror: () => fig.replaceChildren(h('div', { class: 'q-figure-missing', role: 'note' },
+        h('b', null, '圖片無法顯示'), alt ? '：' + alt : '')),
+      src,
+    });
+    fig.append(
+      h('a', { href: src, target: '_blank', rel: 'noopener', title: '在新分頁開啟原圖' }, pic),
+      alt ? h('figcaption', null, alt) : null);
+    if (cache) cache.set(key, fig);
+    return fig;
+  }
+  // 題組文章：段落加上題組的圖片
+  function passageBody(group) {
+    return [paras((group.passage || []).join('\n')), figure(group.image)];
+  }
+
   /* ---------- 題目渲染 ----------
+   * stemBlock(q, { figures })：figures 是 figure() 用的 Map 快取（選填）
    * opts.chosen：已選答案字串
    * opts.onChoose(letter)：可作答時的點選回呼
    * opts.reveal：{ answer, showAnswer } 顯示正解與對錯
+   * opts.who：標示「誰選了」的稱呼，預設「你」；老師端用「學生」
    */
-  function stemBlock(q) {
+  function stemBlock(q, opts) {
     const out = [h('div', { class: 'stem' }, paras(q.stem))];
     if (q.table && q.table.length) {
       const [head, ...rows] = q.table;
@@ -193,6 +241,7 @@
         h('thead', null, h('tr', null, head.map((c) => h('th', null, c)))),
         h('tbody', null, rows.map((r) => h('tr', null, r.map((c) => h('td', null, c))))))));
     }
+    out.push(figure(q.image, opts && opts.figures));
     return out;
   }
   function optionList(q, opts) {
@@ -200,14 +249,15 @@
     const reveal = opts.reveal;
     const answer = reveal && reveal.showAnswer ? Core.normAnswer(reveal.answer) : '';
     const multi = q.type === 'multi';
+    const who = opts.who || '你';
     return h('div', { class: 'options', role: multi ? 'group' : 'radiogroup' }, q.options.map((text, i) => {
       const L = Core.letter(i);
       const picked = chosen.includes(L);
       let cls = 'opt' + (multi ? ' multi' : '');
       let mark = null;
       if (answer) {
-        if (answer.includes(L)) { cls += ' is-answer'; mark = picked ? '✓ 你選了，正確' : '✓ 正確答案'; }
-        else if (picked) { cls += ' is-wrong'; mark = '✗ 你選了，錯誤'; }
+        if (answer.includes(L)) { cls += ' is-answer'; mark = picked ? `✓ ${who}選了，正確` : '✓ 正確答案'; }
+        else if (picked) { cls += ' is-wrong'; mark = `✗ ${who}選了，錯誤`; }
       }
       const attrs = {
         class: cls,
@@ -223,6 +273,13 @@
         h('span', null, h('span', { class: 'sr-only' }, `(${L}) `), text, mark ? h('span', { class: 'mark' }, mark) : null));
     }));
   }
+  // 外部連結：只有 http(s) 網址才做成連結，其他（例如 javascript:）只顯示文字
+  function extLink(url) {
+    const u = String(url || '').trim();
+    if (window.Core.isWebUrl(u)) return h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, u);
+    return h('span', { class: 'muted' }, u);
+  }
+
   function typeLabel(q) { return q.type === 'multi' ? '多選題' : '單選題'; }
 
   function subjectOf(exam) { return exam.subject || '綜合'; }
@@ -230,6 +287,6 @@
   window.UI = {
     h, append, paras, fmtScore, fmtClock, fmtDuration, fmtDate, pct,
     route, go, start, render, currentPath, dialog, toast, saveFile, copyText, readFile,
-    stemBlock, optionList, typeLabel, subjectOf, showError,
+    figure, passageBody, stemBlock, optionList, typeLabel, extLink, subjectOf, showError,
   };
 })();
